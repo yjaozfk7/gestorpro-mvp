@@ -39,7 +39,24 @@ export interface MonthlyData {
   saldo: number
 }
 
+// Tipos de planos (compatível com Kiwify)
 export type SubscriptionPlan = 'gratuito' | 'premium' | 'pro'
+
+// Alias para compatibilidade com nomenclatura da Kiwify
+export type KiwifyPlan = 'free' | 'premium' | 'pro'
+
+// Mapeamento entre nomenclaturas
+export const PLAN_MAPPING: Record<KiwifyPlan, SubscriptionPlan> = {
+  'free': 'gratuito',
+  'premium': 'premium',
+  'pro': 'pro'
+}
+
+export const REVERSE_PLAN_MAPPING: Record<SubscriptionPlan, KiwifyPlan> = {
+  'gratuito': 'free',
+  'premium': 'premium',
+  'pro': 'pro'
+}
 
 export interface User {
   name: string

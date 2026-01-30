@@ -17,7 +17,7 @@ export function PlansModal({ isOpen, onClose, currentPlan }: PlansModalProps) {
       pro: 'https://pay.kiwify.com.br/HKPsk6i'
     }
     
-    // Abrir checkout em nova aba
+    // Abrir em nova aba do navegador, fora do WebView
     window.open(checkoutUrls[plan], '_blank', 'noopener,noreferrer')
   }
 

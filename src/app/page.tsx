@@ -6,6 +6,7 @@ import { getTransactions, getTasks, getUser, saveUser } from '@/lib/storage'
 import { getEmployees } from '@/lib/employee-storage'
 import { getGoals } from '@/lib/goals-storage'
 import { getOnboardingProgress, updateOnboardingProgress, getOnboardingCompletion } from '@/lib/onboarding-storage'
+import { supabase } from '@/lib/supabase'
 import { 
   calculateMonthlyData, 
   getCurrentMonth, 
@@ -15,13 +16,14 @@ import {
 } from '@/lib/calculations'
 import { MonthlySummary } from '@/components/custom/monthly-summary'
 import { SimpleChart } from '@/components/custom/simple-chart'
-import { EmployeeManagement } from '@/components/custom/employee-management'
+import { PessoasTab } from '@/components/custom/pessoas-tab'
 import { TasksExpanded } from '@/components/custom/tasks-expanded'
 import { FinanceiroExpanded } from '@/components/custom/financeiro-expanded'
 import { PlansModal } from '@/components/custom/plans-modal'
-import { TrendingUp, LayoutDashboard, DollarSign, CheckSquare, Users, UserCircle, Crown, AlertCircle, ArrowUp, ArrowDown, Minus as MinusIcon, Phone } from 'lucide-react'
+import { TrendingUp, LayoutDashboard, DollarSign, CheckSquare, Users, UserCircle, Crown, AlertCircle, ArrowUp, ArrowDown, Minus as MinusIcon, Phone, Mail } from 'lucide-react'
 
-type TabType = 'resumo' | 'financeiro' | 'tarefas' | 'equipe' | 'conta'
+type TabType = 'resumo' | 'financeiro' | 'tarefas' | 'pessoas' | 'conta'
+type AuthMethod = 'email' | 'phone'
 
 export default function GestorPro() {
   const [transactions, setTransactions] = useState<Transaction[]>([])
@@ -39,12 +41,22 @@ export default function GestorPro() {
   const [whatYouSell, setWhatYouSell] = useState('')
   const [showPlansModal, setShowPlansModal] = useState(false)
   
+  // Estados de autenticação
+  const [authMethod, setAuthMethod] = useState<AuthMethod>('email')
+  const [verificationCode, setVerificationCode] = useState('')
+  const [showVerification, setShowVerification] = useState(false)
+  const [isLoading, setIsLoading] = useState(false)
+  const [authMessage, setAuthMessage] = useState('')
+  
   // Estado para controlar hidratação
   const [isClient, setIsClient] = useState(false)
 
   useEffect(() => {
     // Marcar que estamos no cliente para evitar problemas de hidratação
     setIsClient(true)
+    
+    // Verificar sessão do Supabase
+    checkSupabaseSession()
     
     // Carregar dados do localStorage
     setTransactions(getTransactions())
@@ -65,23 +77,122 @@ export default function GestorPro() {
     }
   }, [])
 
-  const handleSaveUser = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!userName.trim() || !email.trim()) return
-
-    const newUser: User = {
-      name: userName,
-      businessName: businessName || undefined,
-      email: email,
-      phone: phone || undefined,
-      businessCategory: businessCategory,
-      whatYouSell: whatYouSell || undefined,
-      isPremium: false,
-      subscriptionPlan: 'gratuito',
+  const checkSupabaseSession = async () => {
+    const { data: { session } } = await supabase.auth.getSession()
+    if (session?.user) {
+      // Usuário já autenticado via Supabase
+      const savedUser = getUser()
+      if (!savedUser) {
+        // Criar perfil local baseado no usuário do Supabase
+        setEmail(session.user.email || '')
+        setUserName(session.user.user_metadata?.full_name || session.user.email?.split('@')[0] || '')
+      }
     }
-    saveUser(newUser)
-    setUser(newUser)
-    setShowWelcome(false)
+  }
+
+  const handleGoogleLogin = async () => {
+    setIsLoading(true)
+    setAuthMessage('')
+    
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: `${window.location.origin}/auth/callback`,
+        },
+      })
+      
+      if (error) throw error
+    } catch (error: any) {
+      setAuthMessage(error.message || 'Erro ao fazer login com Google')
+      setIsLoading(false)
+    }
+  }
+
+  const handleSaveUser = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!userName.trim() || (authMethod === 'email' && !email.trim()) || (authMethod === 'phone' && !phone.trim())) return
+
+    setIsLoading(true)
+    setAuthMessage('')
+
+    try {
+      if (authMethod === 'email') {
+        // Cadastro/Login com e-mail
+        const { error } = await supabase.auth.signInWithOtp({
+          email: email,
+          options: {
+            shouldCreateUser: true,
+          },
+        })
+        
+        if (error) throw error
+        
+        setShowVerification(true)
+        setAuthMessage('Enviamos um código de verificação de 6 dígitos para seu e-mail.')
+        updateOnboardingProgress({ profileComplete: true })
+      } else {
+        // Cadastro/Login com telefone
+        const { error } = await supabase.auth.signInWithOtp({
+          phone: phone,
+          options: {
+            shouldCreateUser: true,
+          },
+        })
+        
+        if (error) throw error
+        
+        setShowVerification(true)
+        setAuthMessage('Enviamos um código de verificação por SMS para seu telefone.')
+        updateOnboardingProgress({ profileComplete: true, phoneAdded: true })
+      }
+    } catch (error: any) {
+      setAuthMessage(error.message || 'Erro ao enviar código de verificação')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const handleVerifyCode = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!verificationCode.trim() || verificationCode.length !== 6) {
+      setAuthMessage('Por favor, insira o código de 6 dígitos')
+      return
+    }
+
+    setIsLoading(true)
+    setAuthMessage('')
+
+    try {
+      const { error } = await supabase.auth.verifyOtp({
+        [authMethod === 'email' ? 'email' : 'phone']: authMethod === 'email' ? email : phone,
+        token: verificationCode,
+        type: authMethod === 'email' ? 'email' : 'sms',
+      })
+      
+      if (error) throw error
+      
+      // E-mail/telefone confirmado com sucesso
+      const newUser: User = {
+        name: userName,
+        businessName: businessName || undefined,
+        email: email,
+        phone: phone || undefined,
+        businessCategory: businessCategory,
+        whatYouSell: whatYouSell || undefined,
+        isPremium: false,
+        subscriptionPlan: 'gratuito',
+      }
+      saveUser(newUser)
+      setUser(newUser)
+      setShowWelcome(false)
+      updateOnboardingProgress({ emailVerified: true })
+      setAuthMessage('E-mail confirmado com sucesso!')
+    } catch (error: any) {
+      setAuthMessage(error.message || 'Código inválido. Tente novamente.')
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   const handleUpdateUser = (e: React.FormEvent) => {
@@ -272,7 +383,7 @@ export default function GestorPro() {
     )
   }
 
-  // Tela de boas-vindas
+  // Tela de boas-vindas com autenticação
   if (showWelcome) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 flex items-center justify-center p-4">
@@ -289,77 +400,241 @@ export default function GestorPro() {
             </p>
           </div>
 
-          <form onSubmit={handleSaveUser} className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Seu nome *
-              </label>
-              <input
-                type="text"
-                value={userName}
-                onChange={(e) => setUserName(e.target.value)}
-                placeholder="Digite seu nome"
-                className="w-full px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                required
-              />
-            </div>
+          {!showVerification ? (
+            <form onSubmit={handleSaveUser} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Seu nome *
+                </label>
+                <input
+                  type="text"
+                  value={userName}
+                  onChange={(e) => setUserName(e.target.value)}
+                  placeholder="Digite seu nome"
+                  className="w-full px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  required
+                  disabled={isLoading}
+                />
+              </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Seu email *
-              </label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="seu@email.com"
-                className="w-full px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                required
-              />
-            </div>
+              {/* Seletor de método de autenticação */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Como deseja se cadastrar? *
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAuthMethod('email')}
+                    className={`flex items-center justify-center gap-2 px-4 py-3 rounded-xl border-2 transition-all ${
+                      authMethod === 'email'
+                        ? 'border-blue-600 bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300'
+                        : 'border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300'
+                    }`}
+                    disabled={isLoading}
+                  >
+                    <Mail className="w-5 h-5" />
+                    <span className="font-medium">E-mail</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAuthMethod('phone')}
+                    className={`flex items-center justify-center gap-2 px-4 py-3 rounded-xl border-2 transition-all ${
+                      authMethod === 'phone'
+                        ? 'border-blue-600 bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300'
+                        : 'border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300'
+                    }`}
+                    disabled={isLoading}
+                  >
+                    <Phone className="w-5 h-5" />
+                    <span className="font-medium">Telefone</span>
+                  </button>
+                </div>
+              </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Nome do seu negócio (opcional)
-              </label>
-              <input
-                type="text"
-                value={businessName}
-                onChange={(e) => setBusinessName(e.target.value)}
-                placeholder="Ex: Loja do João, Maria Costura..."
-                className="w-full px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
-            </div>
+              {authMethod === 'email' ? (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Seu email *
+                  </label>
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="seu@email.com"
+                    className="w-full px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    required
+                    disabled={isLoading}
+                  />
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Seu telefone *
+                  </label>
+                  <input
+                    type="tel"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    placeholder="(00) 00000-0000"
+                    className="w-full px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    required
+                    disabled={isLoading}
+                  />
+                </div>
+              )}
 
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Categoria do negócio *
-              </label>
-              <select
-                value={businessCategory}
-                onChange={(e) => setBusinessCategory(e.target.value as any)}
-                className="w-full px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                required
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Nome do seu negócio (opcional)
+                </label>
+                <input
+                  type="text"
+                  value={businessName}
+                  onChange={(e) => setBusinessName(e.target.value)}
+                  placeholder="Ex: Loja do João, Maria Costura..."
+                  className="w-full px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  disabled={isLoading}
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Categoria do negócio *
+                </label>
+                <select
+                  value={businessCategory}
+                  onChange={(e) => setBusinessCategory(e.target.value as any)}
+                  className="w-full px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  required
+                  disabled={isLoading}
+                >
+                  <option value="comercio">Comércio</option>
+                  <option value="servicos">Serviços</option>
+                  <option value="alimentacao">Alimentação</option>
+                  <option value="negocio_local">Negócio local</option>
+                  <option value="online">Online</option>
+                  <option value="autonomo">Autônomo</option>
+                  <option value="industria_leve">Indústria leve</option>
+                  <option value="profissional_liberal">Profissional liberal</option>
+                  <option value="outro">Outro</option>
+                </select>
+              </div>
+
+              {/* Mensagem de feedback */}
+              {authMessage && (
+                <div className={`p-3 rounded-xl text-sm ${
+                  authMessage.includes('sucesso') || authMessage.includes('Enviamos')
+                    ? 'bg-green-50 dark:bg-green-950 text-green-700 dark:text-green-300 border border-green-300 dark:border-green-700'
+                    : 'bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-300 border border-red-300 dark:border-red-700'
+                }`}>
+                  {authMessage}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={isLoading}
+                className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold py-3 px-6 rounded-xl transition-all duration-200 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <option value="comercio">Comércio</option>
-                <option value="servicos">Serviços</option>
-                <option value="alimentacao">Alimentação</option>
-                <option value="negocio_local">Negócio local</option>
-                <option value="online">Online</option>
-                <option value="autonomo">Autônomo</option>
-                <option value="industria_leve">Indústria leve</option>
-                <option value="profissional_liberal">Profissional liberal</option>
-                <option value="outro">Outro</option>
-              </select>
-            </div>
+                {isLoading ? 'Enviando...' : 'Começar a usar'}
+              </button>
 
-            <button
-              type="submit"
-              className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold py-3 px-6 rounded-xl transition-all duration-200 shadow-lg hover:shadow-xl"
-            >
-              Começar a usar
-            </button>
-          </form>
+              {/* Divisor */}
+              <div className="relative my-6">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-gray-300 dark:border-gray-600"></div>
+                </div>
+                <div className="relative flex justify-center text-sm">
+                  <span className="px-2 bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400">ou</span>
+                </div>
+              </div>
+
+              {/* Botão Google */}
+              <button
+                type="button"
+                onClick={handleGoogleLogin}
+                disabled={isLoading}
+                className="w-full flex items-center justify-center gap-3 bg-white dark:bg-gray-900 border-2 border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300 font-medium py-3 px-6 rounded-xl transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <svg className="w-5 h-5" viewBox="0 0 24 24">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                </svg>
+                Continuar com Google
+              </button>
+            </form>
+          ) : (
+            // Tela de verificação de código
+            <form onSubmit={handleVerifyCode} className="space-y-4">
+              <div className="text-center mb-4">
+                <div className="inline-flex items-center justify-center w-12 h-12 bg-blue-100 dark:bg-blue-900 rounded-full mb-3">
+                  {authMethod === 'email' ? (
+                    <Mail className="w-6 h-6 text-blue-600 dark:text-blue-400" />
+                  ) : (
+                    <Phone className="w-6 h-6 text-blue-600 dark:text-blue-400" />
+                  )}
+                </div>
+                <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100 mb-2">
+                  Confirme seu {authMethod === 'email' ? 'e-mail' : 'telefone'}
+                </h2>
+                <p className="text-sm text-gray-600 dark:text-gray-400">
+                  Digite o código de 6 dígitos que enviamos para<br />
+                  <span className="font-medium">{authMethod === 'email' ? email : phone}</span>
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Código de verificação
+                </label>
+                <input
+                  type="text"
+                  value={verificationCode}
+                  onChange={(e) => setVerificationCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="000000"
+                  maxLength={6}
+                  className="w-full px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 text-center text-2xl font-bold tracking-widest focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  required
+                  disabled={isLoading}
+                  autoFocus
+                />
+              </div>
+
+              {authMessage && (
+                <div className={`p-3 rounded-xl text-sm ${
+                  authMessage.includes('sucesso')
+                    ? 'bg-green-50 dark:bg-green-950 text-green-700 dark:text-green-300 border border-green-300 dark:border-green-700'
+                    : 'bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-300 border border-red-300 dark:border-red-700'
+                }`}>
+                  {authMessage}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={isLoading || verificationCode.length !== 6}
+                className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold py-3 px-6 rounded-xl transition-all duration-200 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isLoading ? 'Verificando...' : 'Confirmar código'}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setShowVerification(false)
+                  setVerificationCode('')
+                  setAuthMessage('')
+                }}
+                disabled={isLoading}
+                className="w-full text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 font-medium py-2 transition-colors disabled:opacity-50"
+              >
+                Voltar
+              </button>
+            </form>
+          )}
         </div>
       </div>
     )
@@ -560,9 +835,9 @@ export default function GestorPro() {
           />
         )
 
-      case 'equipe':
+      case 'pessoas':
         return (
-          <EmployeeManagement
+          <PessoasTab
             employees={employees}
             onEmployeesChanged={refreshData}
             userPlan={user?.subscriptionPlan || 'gratuito'}
@@ -726,29 +1001,11 @@ export default function GestorPro() {
             <div className="flex items-center gap-3">
               {/* Logo GestorPro */}
               <div className="flex items-center gap-2">
-                <svg 
-                  width="40" 
-                  height="40" 
-                  viewBox="0 0 40 40" 
-                  fill="none" 
-                  xmlns="http://www.w3.org/2000/svg"
-                  className="flex-shrink-0"
-                >
-                  <rect width="40" height="40" rx="10" fill="url(#gradient)" />
-                  <path 
-                    d="M12 20L18 26L28 14" 
-                    stroke="white" 
-                    strokeWidth="3" 
-                    strokeLinecap="round" 
-                    strokeLinejoin="round"
-                  />
-                  <defs>
-                    <linearGradient id="gradient" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
-                      <stop stopColor="#2563EB" />
-                      <stop offset="1" stopColor="#4F46E5" />
-                    </linearGradient>
-                  </defs>
-                </svg>
+                <img 
+                  src="https://k6hrqrxuu8obbfwn.public.blob.vercel-storage.com/temp/13e91ceb-9533-417b-aab6-22ca7782d03a.png" 
+                  alt="Logo GestorPro" 
+                  className="h-10 w-10 rounded-xl object-cover flex-shrink-0"
+                />
                 <div>
                   <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
                     GestorPro
@@ -759,13 +1016,12 @@ export default function GestorPro() {
                 </div>
               </div>
             </div>
-            {/* Botão Premium discreto - fixo em todas as abas */}
+            {/* Botão Fazer Upgrade - abre modal de planos */}
             <button
               onClick={() => setShowPlansModal(true)}
-              className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900 transition-colors text-sm border border-amber-200 dark:border-amber-800"
+              className="px-6 py-3 bg-amber-600 hover:bg-amber-700 text-white font-semibold rounded-xl transition-colors"
             >
-              <Crown className="w-4 h-4" />
-              <span className="hidden sm:inline font-medium">Premium</span>
+              Fazer Upgrade
             </button>
           </div>
         </div>
@@ -824,15 +1080,15 @@ export default function GestorPro() {
             </button>
 
             <button
-              onClick={() => setActiveTab('equipe')}
+              onClick={() => setActiveTab('pessoas')}
               className={`flex flex-col items-center gap-1 px-4 py-2 rounded-xl transition-all duration-200 ${
-                activeTab === 'equipe'
+                activeTab === 'pessoas'
                   ? 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950'
                   : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100'
               }`}
             >
               <Users className="w-6 h-6" />
-              <span className="text-xs font-medium">Equipe</span>
+              <span className="text-xs font-medium">Pessoas</span>
             </button>
 
             <button
